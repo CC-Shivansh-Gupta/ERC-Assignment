@@ -1,0 +1,292 @@
+import gym
+import numpy as np
+import random
+import matplotlib.pyplot as plt
+from collections import deque
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense
+from tensorflow.keras.optimizers import Adam
+import time
+
+class DQNAgent:
+    def __init__(self, state_size=4, action_size=2, memory_size=10000,
+                 gamma=0.99, epsilon=1.0, epsilon_decay=0.995, epsilon_min=0.01, 
+                 learning_rate=0.001, batch_size=64, update_target_freq=20):
+        # Environment and action parameters
+        self.state_size = state_size
+        self.action_size = action_size
+        
+        # Hyperparameters
+        self.memory = deque(maxlen=memory_size)
+        self.gamma = gamma      # Discount factor
+        self.epsilon = epsilon  # Exploration rate
+        self.epsilon_decay = epsilon_decay
+        self.epsilon_min = epsilon_min
+        self.learning_rate = learning_rate
+        self.batch_size = batch_size
+        self.update_target_freq = update_target_freq
+        
+        # Neural Networks (main and target)
+        self.model = self._build_model()
+        self.target_model = self._build_model()
+        self.update_target_network()
+        
+        # Metrics to track
+        self.rewards_history = []
+        self.avg_rewards_history = []
+        self.losses = []
+        self.epsilon_history = []
+        self.episode_count = 0
+        
+    def _build_model(self):
+        """Neural Network for Deep Q-learning Model"""
+        model = Sequential()
+        model.add(Dense(64, input_dim=self.state_size, activation='relu'))
+        model.add(Dense(64, activation='relu'))
+        model.add(Dense(self.action_size, activation='linear'))
+        model.compile(loss='mse', optimizer=Adam(learning_rate=self.learning_rate))
+        return model
+    
+    def update_target_network(self):
+        """Copy weights from model to target_model"""
+        self.target_model.set_weights(self.model.get_weights())
+    
+    def remember(self, state, action, reward, next_state, done):
+        """Store experience in memory"""
+        self.memory.append((state, action, reward, next_state, done))
+    
+    def select_action(self, state):
+        """Epsilon-greedy action selection"""
+        if np.random.rand() <= self.epsilon:
+            return random.randrange(self.action_size)
+        
+        state = np.reshape(state, [1, self.state_size])
+        q_values = self.model.predict(state, verbose=0)[0]
+        return np.argmax(q_values)
+    
+    def replay(self):
+        """Train the model on batches of experience"""
+        if len(self.memory) < self.batch_size:
+            return 0
+        
+        minibatch = random.sample(self.memory, self.batch_size)
+        
+        states = np.array([e[0] for e in minibatch])
+        actions = np.array([e[1] for e in minibatch])
+        rewards = np.array([e[2] for e in minibatch])
+        next_states = np.array([e[3] for e in minibatch])
+        dones = np.array([e[4] for e in minibatch])
+        
+        # Predict Q-values for current states
+        states_q_values = self.model.predict(states, verbose=0)
+        
+        # Predict Q-values for next states using target network
+        next_states_q_values = self.target_model.predict(next_states, verbose=0)
+        
+        # Update Q-value targets for actions taken
+        for i in range(self.batch_size):
+            if dones[i]:
+                states_q_values[i][actions[i]] = rewards[i]
+            else:
+                states_q_values[i][actions[i]] = rewards[i] + self.gamma * np.max(next_states_q_values[i])
+        
+        # Train the model
+        history = self.model.fit(states, states_q_values, epochs=1, verbose=0)
+        loss = history.history['loss'][0]
+        
+        # Decay epsilon
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
+            
+        return loss
+    
+    def train(self, env, episodes=500, max_steps=500, render=False, render_freq=100, solved_threshold=475):
+        """Train the agent on the environment"""
+        scores = deque(maxlen=100)
+        
+        for episode in range(episodes):
+            self.episode_count += 1
+            # In the train method:
+            reset_result = env.reset()
+            if isinstance(reset_result, tuple):
+              state, _ = reset_result  # Newer Gym versions (gymnasium)
+            else:
+              state = reset_result  # Older Gym versions
+            state = np.reshape(state, [1, self.state_size])[0]
+            episode_reward = 0
+            episode_losses = []
+            
+            for step in range(max_steps):
+                # Render if required
+                if render and episode % render_freq == 0:
+                    env.render()
+                    time.sleep(0.01)
+                
+                # Select and perform action
+                action = self.select_action(state)
+                next_state, reward, terminated, truncated, _ = env.step(action)
+                done = terminated or truncated
+                next_state = np.reshape(next_state, [1, self.state_size])[0]
+                
+                # Store experience in memory
+                self.remember(state, action, reward, next_state, done)
+                
+                # Train model
+                loss = self.replay()
+                if loss > 0:
+                    episode_losses.append(loss)
+                
+                # Update target network periodically
+                if self.episode_count % self.update_target_freq == 0:
+                    self.update_target_network()
+                
+                # Move to next state
+                state = next_state
+                episode_reward += reward
+                
+                # End episode if done
+                if done:
+                    break
+            
+            # Track metrics
+            scores.append(episode_reward)
+            avg_score = np.mean(scores)
+            
+            self.rewards_history.append(episode_reward)
+            self.avg_rewards_history.append(avg_score)
+            self.epsilon_history.append(self.epsilon)
+            
+            if episode_losses:
+                self.losses.append(np.mean(episode_losses))
+            
+            # Print progress
+            if episode % 10 == 0:
+                print(f"Episode: {episode}, Reward: {episode_reward}, Avg Reward: {avg_score:.2f}, Epsilon: {self.epsilon:.4f}")
+            
+            # Check if environment is solved
+            if len(scores) == 100 and avg_score >= solved_threshold:
+                print(f"\nEnvironment solved in {episode+1} episodes!")
+                break
+        
+        return self.rewards_history, self.avg_rewards_history, self.epsilon_history, self.losses
+    
+    def test(self, env, episodes=10, render=True):
+        """Test the trained agent"""
+        test_rewards = []
+        
+        for episode in range(episodes):
+            reset_result = env.reset()
+            if isinstance(reset_result, tuple):
+              state, _ = reset_result
+            else:
+              state = reset_result
+            state = np.reshape(state, [1, self.state_size])[0]
+            episode_reward = 0
+            done = False
+            
+            while not done:
+                if render:
+                    env.render()
+                    time.sleep(0.01)
+                
+                # Use greedy policy for testing
+                state_tensor = np.reshape(state, [1, self.state_size])
+                q_values = self.model.predict(state_tensor, verbose=0)[0]
+                action = np.argmax(q_values)
+                
+                next_state, reward, terminated, truncated, _ = env.step(action)
+                done = terminated or truncated
+                state = np.reshape(next_state, [1, self.state_size])[0]
+                episode_reward += reward
+            
+            test_rewards.append(episode_reward)
+            print(f"Test Episode: {episode+1}, Reward: {episode_reward}")
+        
+        return test_rewards
+    
+    def save_model(self, filepath):
+        """Save the trained model"""
+        self.model.save(filepath)
+    
+    def load_model(self, filepath):
+        """Load a trained model"""
+        self.model = tf.keras.models.load_model(filepath)
+        self.target_model = tf.keras.models.load_model(filepath)
+    
+    def plot_results(self):
+        """Plot training results"""
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 15))
+        
+        # Plot episode rewards and average
+        ax1.plot(self.rewards_history, label='Episode Reward', alpha=0.6)
+        ax1.plot(self.avg_rewards_history, label='100-Episode Moving Average', color='red')
+        ax1.set_xlabel('Episode')
+        ax1.set_ylabel('Reward')
+        ax1.set_title('Training Rewards')
+        ax1.legend()
+        ax1.grid(True)
+        
+        # Plot loss
+        if self.losses:
+            ax2.plot(self.losses, label='Loss', color='orange')
+            ax2.set_xlabel('Training Step')
+            ax2.set_ylabel('Loss')
+            ax2.set_title('Training Loss')
+            ax2.legend()
+            ax2.grid(True)
+        
+        # Plot epsilon decay
+        ax3.plot(self.epsilon_history, label='Exploration Rate (Epsilon)', color='green')
+        ax3.set_xlabel('Episode')
+        ax3.set_ylabel('Epsilon')
+        ax3.set_title('Exploration Rate Decay')
+        ax3.legend()
+        ax3.grid(True)
+        
+        plt.tight_layout()
+        plt.show()
+
+def main():
+    # Create environment
+    env = gym.make('CartPole-v1')
+    state_size = env.observation_space.shape[0]
+    action_size = env.action_space.n
+    
+    # Create agent
+    agent = DQNAgent(
+        state_size=state_size,
+        action_size=action_size,
+        memory_size=10000,
+        gamma=0.99,
+        epsilon=1.0,
+        epsilon_decay=0.995,
+        epsilon_min=0.01,
+        learning_rate=0.001,
+        batch_size=64,
+        update_target_freq=5
+    )
+    
+    # Train agent
+    print("Starting training...")
+    rewards, avg_rewards, epsilons, losses = agent.train(env, episodes=1000000, solved_threshold=475, render = False)
+    
+    # Plot results
+    agent.plot_results()
+    
+    # Test the trained agent
+    print("\nTesting the trained agent...")
+    test_env = gym.make('CartPole-v1', render_mode='human')
+    test_rewards = agent.test(test_env, episodes=200)
+    print(f"Average test reward: {np.mean(test_rewards):.2f}")
+    
+    # Save the model
+    agent.save_model("dqn_cartpole.h5")
+    print("Model saved to dqn_cartpole.h5")
+    
+    # Close environments
+    env.close()
+    test_env.close()
+
+if __name__ == "__main__":
+    main()
