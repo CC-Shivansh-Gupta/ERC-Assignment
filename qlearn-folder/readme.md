@@ -1,0 +1,1 @@
+I understood the algorithm and the code but couldnt run it due to some prpoblems in my pc. i tried running it on my friends pc but his pyhton version was not compatible with tensorflow so i couldnt run this code.
